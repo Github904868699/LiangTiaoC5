@@ -9,6 +9,7 @@ import json
 import socketserver
 import threading
 from ctypes import POINTER, byref, cast, c_ubyte
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Dict
 
 import time
@@ -38,9 +39,12 @@ UI_TARGET_FPS = 15.0
 UI_PAINT_FPS = 12.0
 CONFIG_PATH = "config.json"
 
-TRIGGER_REGISTER_ADDR = 0
-RESULT_REGISTER_ADDR_1 = 1
-RESULT_REGISTER_ADDR_2 = 2
+TRIGGER_REGISTER_ADDR_1 = 0
+TRIGGER_REGISTER_ADDR_2 = 1
+RESULT_REGISTER_ADDR_1 = 2
+RESULT_REGISTER_ADDR_2 = 3
+PULSE_REGISTER_ADDR_1 = 4
+PULSE_REGISTER_ADDR_2 = 5
 
 APP_TITLE = "Camera"
 APP_ICON = "Camera.ico"
@@ -844,6 +848,8 @@ class UsbGrabber(QtCore.QThread):
 # ---------------------- Main UI ----------------------
 class MainWindow(QtWidgets.QMainWindow):
     modbus_trigger_sig = QtCore.pyqtSignal(int)
+    yolo_result_sig = QtCore.pyqtSignal(int, int, int)
+    toast_sig = QtCore.pyqtSignal(str, int)
 
     def __init__(self):
         super().__init__()
@@ -859,6 +865,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.modbus_server = None
         self.modbus_error: Optional[str] = None
         self.modbus_trigger_sig.connect(self._on_modbus_trigger)
+        self.yolo_result_sig.connect(self._on_yolo_result)
+        self.toast_sig.connect(self._show_toast)
+        self._last_trigger_values = {
+            TRIGGER_REGISTER_ADDR_1: 0,
+            TRIGGER_REGISTER_ADDR_2: 0,
+        }
+        self._executor = ThreadPoolExecutor(max_workers=1)
 
         # 默认摄像头配置（双路独立）
         self.slot_sources: Dict[int, str] = {1: "hik", 2: "hik"}
@@ -1714,19 +1727,50 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _handle_recognition_request(self, cam_index: int):
         reg_addr = RESULT_REGISTER_ADDR_1 if cam_index == 1 else RESULT_REGISTER_ADDR_2
-        result_value = self._run_yolo_recognition(cam_index)
-        self._publish_modbus_result(reg_addr, result_value)
-        if self.modbus_model:
-            self.modbus_model.set_register(TRIGGER_REGISTER_ADDR, 0)
+        if not self._executor:
+            return
+
+        def _task():
+            return cam_index, reg_addr, self._run_yolo_recognition(cam_index)
+
+        future = self._executor.submit(_task)
+        future.add_done_callback(self._handle_yolo_future)
 
     def _on_modbus_write(self, addr: int, value: int):
-        if addr == TRIGGER_REGISTER_ADDR and value in (1, 2):
-            print(f"[MODBUS] 收到触发请求 {value}")
-            self.modbus_trigger_sig.emit(int(value))
+        if addr not in (TRIGGER_REGISTER_ADDR_1, TRIGGER_REGISTER_ADDR_2):
+            return
+        if value == 1 and self._last_trigger_values.get(addr, 0) != 1:
+            cam_index = 1 if addr == TRIGGER_REGISTER_ADDR_1 else 2
+            print(f"[MODBUS] 收到触发请求 {cam_index}")
+            self._last_trigger_values[addr] = 1
+            self.modbus_trigger_sig.emit(cam_index)
+        elif value == 0:
+            self._last_trigger_values[addr] = 0
 
     @QtCore.pyqtSlot(int)
     def _on_modbus_trigger(self, cam_index: int):
         self._handle_recognition_request(int(cam_index))
+
+    def _handle_yolo_future(self, future):
+        try:
+            cam_index, reg_addr, result_value = future.result()
+        except Exception as exc:
+            print(f"[YOLO] 异步推理失败: {exc}")
+            return
+        self.yolo_result_sig.emit(int(cam_index), int(reg_addr), int(result_value))
+
+    @QtCore.pyqtSlot(int, int, int)
+    def _on_yolo_result(self, cam_index: int, reg_addr: int, result_value: int):
+        self._publish_modbus_result(reg_addr, result_value)
+        trigger_addr = TRIGGER_REGISTER_ADDR_1 if cam_index == 1 else TRIGGER_REGISTER_ADDR_2
+        if self.modbus_model:
+            pulse_addr = PULSE_REGISTER_ADDR_1 if cam_index == 1 else PULSE_REGISTER_ADDR_2
+            self.modbus_model.set_register(trigger_addr, 0)
+            self.modbus_model.set_register(pulse_addr, 1)
+            QtCore.QTimer.singleShot(
+                50, lambda addr=pulse_addr: self.modbus_model.set_register(addr, 0)
+            )
+        self._last_trigger_values[trigger_addr] = 0
 
     def _stop_modbus_server(self):
         if not getattr(self, "modbus_server", None):
@@ -1758,6 +1802,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_modbus_status()
 
     def _toast(self, text: str, ms: int = 2200):
+        if QtCore.QThread.currentThread() != self.thread():
+            self.toast_sig.emit(text, ms)
+            return
+        self._show_toast(text, ms)
+
+    @QtCore.pyqtSlot(str, int)
+    def _show_toast(self, text: str, ms: int = 2200):
         self.status_label.setText(text)
         self.toast_timer.start(ms)
 
@@ -1922,6 +1973,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, e):
         self._stop_modbus_server()
         self.stop_camera()
+        if getattr(self, "_executor", None):
+            self._executor.shutdown(wait=False)
         super().closeEvent(e)
 
 
