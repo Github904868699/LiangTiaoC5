@@ -1767,7 +1767,7 @@ class MainWindow(QtWidgets.QMainWindow):
         frame = self.last_frame_bgrs.get(cam_index)
         if frame is None:
             self._toast(f"摄像头{cam_index} 未捕获画面")
-            return 0xFF
+            return 0
 
         model = self._model_for_cam(cam_index)
         if model is None:
