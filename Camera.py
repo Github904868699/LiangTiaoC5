@@ -10,24 +10,24 @@ import socketserver
 import threading
 from ctypes import POINTER, byref, cast, c_ubyte
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 import time
 import socket
 
-# Windows DLL/OpenMP 兼容性兜底（避免 torch 的 c10.dll 因依赖初始化失败而导入失败）
+# Windows DLL/OpenMP 兼容性兜底（避免依赖初始化失败而导入失败）
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-# YOLO (ultralytics)
+# YOLO (onnxruntime)
 try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-    YOLO_IMPORT_ERROR = None
+    import onnxruntime as ort
+    ORT_AVAILABLE = True
+    ORT_IMPORT_ERROR = None
 except Exception as exc:
-    YOLO = None  # type: ignore
-    YOLO_AVAILABLE = False
-    YOLO_IMPORT_ERROR = exc
+    ort = None  # type: ignore
+    ORT_AVAILABLE = False
+    ORT_IMPORT_ERROR = exc
 
 import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
@@ -185,7 +185,7 @@ def load_config(path: str = CONFIG_PATH) -> Dict:
     return cfg
 
 
-def list_pt_models(base_dir: Optional[str] = None) -> List[str]:
+def list_onnx_models(base_dir: Optional[str] = None) -> List[str]:
     try:
         root = Path(base_dir) if base_dir else Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
     except Exception:
@@ -193,7 +193,7 @@ def list_pt_models(base_dir: Optional[str] = None) -> List[str]:
 
     models = []
     try:
-        for p in sorted(root.glob("*.pt")):
+        for p in sorted(root.glob("*.onnx")):
             if p.is_file():
                 models.append(str(p))
     except Exception:
@@ -845,6 +845,153 @@ class UsbGrabber(QtCore.QThread):
         self.cap = None
 
 
+# ---------------------- YOLO (ONNX) ----------------------
+def _nms_boxes(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> List[int]:
+    if boxes.size == 0:
+        return []
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    areas = (x2 - x1 + 1.0) * (y2 - y1 + 1.0)
+    order = scores.argsort()[::-1]
+    keep: List[int] = []
+
+    while order.size > 0:
+        i = int(order[0])
+        keep.append(i)
+        if order.size == 1:
+            break
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        w = np.maximum(0.0, xx2 - xx1 + 1.0)
+        h = np.maximum(0.0, yy2 - yy1 + 1.0)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+
+        inds = np.where(ovr <= iou_thres)[0]
+        order = order[inds + 1]
+
+    return keep
+
+
+class OnnxYoloModel:
+    def __init__(self, model_path: str):
+        if not ORT_AVAILABLE or ort is None:
+            raise RuntimeError(f"onnxruntime 未就绪: {ORT_IMPORT_ERROR}")
+
+        self.model_path = model_path
+        self.session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+        input_meta = self.session.get_inputs()[0]
+        self.input_name = input_meta.name
+        self.input_shape = input_meta.shape
+        self.input_h, self.input_w = self._resolve_input_shape(input_meta.shape)
+        self.names = self._load_names(model_path)
+
+    @staticmethod
+    def _resolve_input_shape(shape) -> Tuple[int, int]:
+        if isinstance(shape, (list, tuple)) and len(shape) >= 4:
+            h = shape[2] if isinstance(shape[2], int) and shape[2] else 640
+            w = shape[3] if isinstance(shape[3], int) and shape[3] else 640
+            return int(h), int(w)
+        return 640, 640
+
+    @staticmethod
+    def _load_names(model_path: str) -> Dict[int, str]:
+        names_path = Path(model_path).with_suffix(".names")
+        if not names_path.exists():
+            return {}
+        try:
+            lines = [line.strip() for line in names_path.read_text(encoding="utf-8").splitlines()]
+        except Exception:
+            return {}
+        return {idx: name for idx, name in enumerate(lines) if name}
+
+    def _letterbox(self, img: np.ndarray) -> Tuple[np.ndarray, float, float, float]:
+        h, w = img.shape[:2]
+        ratio = min(self.input_w / w, self.input_h / h)
+        new_w = int(round(w * ratio))
+        new_h = int(round(h * ratio))
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        pad_w = self.input_w - new_w
+        pad_h = self.input_h - new_h
+        top = pad_h // 2
+        bottom = pad_h - top
+        left = pad_w // 2
+        right = pad_w - left
+        padded = cv2.copyMakeBorder(resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+        return padded, ratio, float(left), float(top)
+
+    def label_for(self, cls_id: int) -> str:
+        return self.names.get(int(cls_id), str(int(cls_id)))
+
+    def predict(self, frame_bgr: np.ndarray, conf_thres: float, iou_thres: float = 0.45):
+        img, ratio, pad_x, pad_y = self._letterbox(frame_bgr)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))[None, ...]
+        outputs = self.session.run(None, {self.input_name: img})
+        preds = outputs[0]
+
+        if preds.ndim == 3:
+            if preds.shape[1] < preds.shape[2]:
+                preds = preds.transpose(0, 2, 1)
+            preds = preds[0]
+        elif preds.ndim == 2:
+            preds = preds
+        else:
+            preds = preds.reshape(-1, preds.shape[-1])
+
+        if preds.shape[-1] == 6:
+            boxes = preds[:, :4]
+            scores = preds[:, 4]
+            cls_ids = preds[:, 5].astype(int)
+        else:
+            boxes = preds[:, :4]
+            scores_all = preds[:, 4:]
+            cls_ids = np.argmax(scores_all, axis=1)
+            scores = scores_all[np.arange(scores_all.shape[0]), cls_ids]
+
+        mask = scores >= float(conf_thres)
+        boxes = boxes[mask]
+        scores = scores[mask]
+        cls_ids = cls_ids[mask]
+
+        if boxes.size == 0:
+            return []
+
+        x_c, y_c, w, h = boxes.T
+        x1 = x_c - w / 2
+        y1 = y_c - h / 2
+        x2 = x_c + w / 2
+        y2 = y_c + h / 2
+        x1 = (x1 - pad_x) / ratio
+        y1 = (y1 - pad_y) / ratio
+        x2 = (x2 - pad_x) / ratio
+        y2 = (y2 - pad_y) / ratio
+
+        x1 = np.clip(x1, 0, frame_bgr.shape[1] - 1)
+        y1 = np.clip(y1, 0, frame_bgr.shape[0] - 1)
+        x2 = np.clip(x2, 0, frame_bgr.shape[1] - 1)
+        y2 = np.clip(y2, 0, frame_bgr.shape[0] - 1)
+
+        final_boxes = np.stack([x1, y1, x2, y2], axis=1)
+        keep = _nms_boxes(final_boxes, scores, iou_thres)
+        results = []
+        for idx in keep:
+            results.append(
+                {
+                    "bbox": final_boxes[idx],
+                    "score": float(scores[idx]),
+                    "cls_id": int(cls_ids[idx]),
+                }
+            )
+        return results
+
+
 # ---------------------- Main UI ----------------------
 class MainWindow(QtWidgets.QMainWindow):
     modbus_trigger_sig = QtCore.pyqtSignal(int)
@@ -857,7 +1004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config = load_config(CONFIG_PATH)
         server_cfg = self.config.get("server", {})
         self.class_map: Dict[str, int] = {k: int(v) for k, v in self.config.get("class_map", {}).items()}
-        self.models: List[str] = list_pt_models()
+        self.models: List[str] = list_onnx_models()
         self.default_model: Optional[str] = self.models[0] if self.models else None
         self.modbus_host = str(server_cfg.get("host", "0.0.0.0") or "0.0.0.0")
         self.modbus_port = int(server_cfg.get("port", 502))
@@ -885,7 +1032,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.yolo_conf = 0.5
         self.slot_yolo_enabled: Dict[int, bool] = {1: False, 2: False}
         self.slot_model_paths: Dict[int, Optional[str]] = {1: self.default_model, 2: self.default_model}
-        self.yolo_model_cache: Dict[str, YOLO] = {}
+        self.yolo_model_cache: Dict[str, OnnxYoloModel] = {}
         self.yolo_style = 0     # 0~7 不同样式
 
         self.last_frame_bgrs: Dict[int, np.ndarray] = {}
@@ -1326,8 +1473,8 @@ class MainWindow(QtWidgets.QMainWindow):
         return candidate
 
     def _ensure_yolo_model(self, model_path: Optional[str] = None) -> bool:
-        if not YOLO_AVAILABLE:
-            self._toast(f"[YOLO] 导入 ultralytics/torch 失败: {YOLO_IMPORT_ERROR}")
+        if not ORT_AVAILABLE:
+            self._toast(f"[YOLO] 导入 onnxruntime 失败: {ORT_IMPORT_ERROR}")
             return False
 
         selected = model_path or self.default_model
@@ -1336,6 +1483,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         path = self._normalized_model_path(selected)
+        if not path.lower().endswith(".onnx"):
+            self._toast("[YOLO] 请使用 .onnx 模型文件")
+            return False
 
         if path in self.yolo_model_cache:
             return True
@@ -1345,14 +1495,14 @@ class MainWindow(QtWidgets.QMainWindow):
             return False
 
         try:
-            self.yolo_model_cache[path] = YOLO(path)
+            self.yolo_model_cache[path] = OnnxYoloModel(path)
             self._toast(f"[YOLO] 模型已加载: {os.path.basename(path)}", ms=2000)
             return True
         except Exception as exc:
             self._toast(f"[YOLO] 加载模型失败: {exc}")
             return False
 
-    def _model_for_cam(self, cam_index: int) -> Optional[YOLO]:
+    def _model_for_cam(self, cam_index: int) -> Optional[OnnxYoloModel]:
         model_path = self.slot_model_paths.get(cam_index) or self.default_model
         if not model_path:
             self._toast("[YOLO] 未选择模型文件")
@@ -1373,18 +1523,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return frame_bgr
 
         try:
-            results = model(frame_bgr, conf=float(self.yolo_conf), verbose=False)
-            if not results:
-                return frame_bgr
-
-            res = results[0]
-            boxes = getattr(res, "boxes", None)
-            if boxes is None:
+            detections = model.predict(frame_bgr, conf_thres=float(self.yolo_conf))
+            if not detections:
                 return frame_bgr
 
             overlay = frame_bgr.copy()
-            names = getattr(res, "names", None) or getattr(model, "names", None) or {}
-
             style = int(getattr(self, "yolo_style", 0))
             font = cv2.FONT_HERSHEY_SIMPLEX
 
@@ -1454,20 +1597,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 lum = 0.299 * r + 0.587 * g + 0.114 * b
                 return (0, 0, 0) if lum > 160 else (255, 255, 255)
 
-            for box in boxes:
-                score = float(box.conf[0]) if box.conf is not None else 0.0
-                if score < float(self.yolo_conf):
-                    continue
+            for det in detections:
+                score = float(det["score"])
+                cls_id = int(det["cls_id"])
+                label = model.label_for(cls_id)
 
-                x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
-                cls_id = int(box.cls[0]) if box.cls is not None else -1
-
-                label = str(cls_id)
-                if isinstance(names, dict) and cls_id in names:
-                    label = str(names[cls_id])
-                elif isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
-                    label = str(names[cls_id])
-
+                x1, y1, x2, y2 = [int(v) for v in det["bbox"].tolist()]
                 text = f"{label} {score:.2f}"
 
                 x1 = max(0, min(w_img - 1, x1))
@@ -1639,35 +1774,22 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0xFF
 
         try:
-            results = model(frame, conf=float(self.yolo_conf), verbose=False)
+            detections = model.predict(frame, conf_thres=float(self.yolo_conf))
         except Exception as exc:
             self._toast(f"[YOLO] 推理异常: {exc}")
             return 0xFF
 
-        if not results:
+        if not detections:
             return 0xFF
 
-        res = results[0]
-        boxes = getattr(res, "boxes", None)
-        if boxes is None:
-            return 0xFF
-
-        names = getattr(res, "names", None) or getattr(model, "names", None) or {}
         best_score = -1.0
         best_label: Optional[str] = None
         best_cls_id: int = -1
 
-        for box in boxes:
-            score = float(box.conf[0]) if box.conf is not None else 0.0
-            if score < float(self.yolo_conf):
-                continue
-
-            cls_id = int(box.cls[0]) if box.cls is not None else -1
-            label = str(cls_id)
-            if isinstance(names, dict) and cls_id in names:
-                label = str(names[cls_id])
-            elif isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
-                label = str(names[cls_id])
+        for det in detections:
+            score = float(det["score"])
+            cls_id = int(det["cls_id"])
+            label = model.label_for(cls_id)
 
             if score > best_score:
                 best_score = score
