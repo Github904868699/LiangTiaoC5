@@ -1193,8 +1193,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lbl_modbus_reg1 = QtWidgets.QLabel("—")
         self.lbl_modbus_reg2 = QtWidgets.QLabel("—")
         modbus_form.addRow("状态：", self.lbl_modbus_status)
-        modbus_form.addRow("寄存器1：", self.lbl_modbus_reg1)
-        modbus_form.addRow("寄存器2：", self.lbl_modbus_reg2)
+        modbus_form.addRow("摄像头1-寄存器2：", self.lbl_modbus_reg1)
+        modbus_form.addRow("摄像头2-寄存器3：", self.lbl_modbus_reg2)
 
         left_lay.addStretch(1)
 
@@ -1780,7 +1780,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0xFF
 
         if not detections:
-            return 0xFF
+            return 0
 
         best_score = -1.0
         best_label: Optional[str] = None
@@ -1797,7 +1797,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 best_cls_id = cls_id
 
         if best_label is None:
-            return 0xFF
+            return 0
 
         mapped = self.class_map.get(best_label)
         if mapped is None and best_cls_id >= 0:
@@ -1840,8 +1840,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 reg_val_1 = None
                 reg_val_2 = None
 
-        reg_text_1 = "—" if reg_val_1 is None else f"{reg_val_1} 0x{int(reg_val_1) & 0xFFFF:04X}"
-        reg_text_2 = "—" if reg_val_2 is None else f"{reg_val_2} 0x{int(reg_val_2) & 0xFFFF:04X}"
+        reg_text_1 = "—" if reg_val_1 is None else f"{reg_val_1}"
+        reg_text_2 = "—" if reg_val_2 is None else f"{reg_val_2}"
         if getattr(self, "lbl_modbus_reg1", None) is not None:
             self.lbl_modbus_reg1.setText(reg_text_1)
         if getattr(self, "lbl_modbus_reg2", None) is not None:
