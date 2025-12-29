@@ -1868,6 +1868,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.modbus_trigger_sig.emit(cam_index)
         elif value == 0:
             self._last_trigger_values[addr] = 0
+            if self.modbus_model:
+                pulse_addr = PULSE_REGISTER_ADDR_1 if addr == TRIGGER_REGISTER_ADDR_1 else PULSE_REGISTER_ADDR_2
+                self.modbus_model.set_register(pulse_addr, 0)
 
     @QtCore.pyqtSlot(int)
     def _on_modbus_trigger(self, cam_index: int):
@@ -1884,15 +1887,9 @@ class MainWindow(QtWidgets.QMainWindow):
     @QtCore.pyqtSlot(int, int, int)
     def _on_yolo_result(self, cam_index: int, reg_addr: int, result_value: int):
         self._publish_modbus_result(reg_addr, result_value)
-        trigger_addr = TRIGGER_REGISTER_ADDR_1 if cam_index == 1 else TRIGGER_REGISTER_ADDR_2
         if self.modbus_model:
             pulse_addr = PULSE_REGISTER_ADDR_1 if cam_index == 1 else PULSE_REGISTER_ADDR_2
-            self.modbus_model.set_register(trigger_addr, 0)
             self.modbus_model.set_register(pulse_addr, 1)
-            QtCore.QTimer.singleShot(
-                1000, lambda addr=pulse_addr: self.modbus_model.set_register(addr, 0)
-            )
-        self._last_trigger_values[trigger_addr] = 0
 
     def _stop_modbus_server(self):
         if not getattr(self, "modbus_server", None):
