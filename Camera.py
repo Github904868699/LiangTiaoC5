@@ -356,32 +356,39 @@ class ModbusRegisterModel:
 
 class ModbusRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
-        while True:
-            header = self._recvn(7)
-            if not header:
-                break
-            try:
-                tid, pid, length = struct.unpack(">HHH", header[:6])
-            except struct.error:
-                break
-            unit = header[6]
-            if length <= 0:
-                continue
-            payload = self._recvn(length - 1)
-            if payload is None:
-                break
-            if not payload:
-                continue
-            function = payload[0]
-            data = payload[1:]
-            response_pdu = self._handle_function(function, data)
-            if response_pdu is None:
-                continue
-            mbap = struct.pack(">HHHB", tid, 0, len(response_pdu) + 1, unit)
-            try:
-                self.request.sendall(mbap + response_pdu)
-            except Exception:
-                break
+        client_ip = self.client_address[0] if self.client_address else ""
+        if client_ip:
+            self.server.set_client(client_ip)
+        try:
+            while True:
+                header = self._recvn(7)
+                if not header:
+                    break
+                try:
+                    tid, pid, length = struct.unpack(">HHH", header[:6])
+                except struct.error:
+                    break
+                unit = header[6]
+                if length <= 0:
+                    continue
+                payload = self._recvn(length - 1)
+                if payload is None:
+                    break
+                if not payload:
+                    continue
+                function = payload[0]
+                data = payload[1:]
+                response_pdu = self._handle_function(function, data)
+                if response_pdu is None:
+                    continue
+                mbap = struct.pack(">HHHB", tid, 0, len(response_pdu) + 1, unit)
+                try:
+                    self.request.sendall(mbap + response_pdu)
+                except Exception:
+                    break
+        finally:
+            if client_ip:
+                self.server.clear_client(client_ip)
 
     def _recvn(self, size: int):
         buf = b""
@@ -437,7 +444,23 @@ class ModbusTCPServer(socketserver.ThreadingTCPServer):
     def __init__(self, host: str, port: int, model: ModbusRegisterModel, on_write=None):
         self.model = model
         self.on_write = on_write
+        self._client_lock = threading.Lock()
+        self._client_addr: Optional[str] = None
         super().__init__((host, port), ModbusRequestHandler)
+
+    @property
+    def client_addr(self) -> Optional[str]:
+        with self._client_lock:
+            return self._client_addr
+
+    def set_client(self, addr: str):
+        with self._client_lock:
+            self._client_addr = addr
+
+    def clear_client(self, addr: str):
+        with self._client_lock:
+            if self._client_addr == addr:
+                self._client_addr = None
 
 
 def start_modbus_server(host: str, port: int, model: ModbusRegisterModel, on_write=None):
@@ -1828,7 +1851,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "modbus_error", None):
             status_text = f"错误: {self.modbus_error}"
         elif getattr(self, "modbus_server", None):
-            status_text = f"{self.modbus_host}:{self.modbus_port}"
+            client_addr = getattr(self.modbus_server, "client_addr", None)
+            if client_addr:
+                status_text = f"已连接: {client_addr}"
+            else:
+                status_text = "未连接"
 
         if getattr(self, "lbl_modbus_status", None) is not None:
             self.lbl_modbus_status.setText(status_text)
