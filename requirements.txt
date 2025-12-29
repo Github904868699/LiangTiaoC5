@@ -2,30 +2,15 @@
 # 国内 PyPI 镜像（加速常规依赖）
 --index-url https://pypi.tuna.tsinghua.edu.cn/simple
 
-# PyTorch CPU wheels（强制 CPU 版 torch/torchvision）
---extra-index-url https://download.pytorch.org/whl/cpu
-
 # ======================
 # 你 Camera.py 直接用到的
 # ======================
 numpy>=1.24,<3
 opencv-python>=4.8,<5
 PyQt5>=5.15,<6
-ultralytics>=8.1,<9
+onnxruntime>=1.16,<2
 pymodbus>=3.6,<4
 nuitka==2.8.9
-
-# ======================
-# PyTorch（CPU）
-# ======================
-torch>=2.1,<3
-torchvision>=0.16,<1
-
-# ======================
-# 可选：你如果要导出/推理 ONNX
-# ======================
-# onnx>=1.14
-# onnxruntime>=1.16
 
 # ======================
 # 注意：以下海康 MVS SDK 模块不在 PyPI
