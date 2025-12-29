@@ -1190,9 +1190,13 @@ class MainWindow(QtWidgets.QMainWindow):
         modbus_form.setSpacing(8)
 
         self.lbl_modbus_status = QtWidgets.QLabel("—")
+        self.lbl_modbus_reg0 = QtWidgets.QLabel("—")
+        self.lbl_modbus_reg01 = QtWidgets.QLabel("—")
         self.lbl_modbus_reg1 = QtWidgets.QLabel("—")
         self.lbl_modbus_reg2 = QtWidgets.QLabel("—")
         modbus_form.addRow("状态：", self.lbl_modbus_status)
+        modbus_form.addRow("摄像头1-寄存器0：", self.lbl_modbus_reg0)
+        modbus_form.addRow("摄像头2-寄存器1：", self.lbl_modbus_reg01)
         modbus_form.addRow("摄像头1-寄存器2：", self.lbl_modbus_reg1)
         modbus_form.addRow("摄像头2-寄存器3：", self.lbl_modbus_reg2)
 
@@ -1827,25 +1831,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if getattr(self, "lbl_modbus_status", None) is not None:
             self.lbl_modbus_status.setText(status_text)
 
+        reg_val_0 = None
         reg_val_1 = None
         reg_val_2 = None
+        reg_val_3 = None
         model = getattr(self, "modbus_model", None)
         if model:
             try:
-                vals1 = model.read(RESULT_REGISTER_ADDR_1, 1)
-                reg_val_1 = vals1[0] if vals1 else None
-                vals2 = model.read(RESULT_REGISTER_ADDR_2, 1)
+                vals0 = model.read(TRIGGER_REGISTER_ADDR_1, 1)
+                reg_val_0 = vals0[0] if vals0 else None
+                vals01 = model.read(TRIGGER_REGISTER_ADDR_2, 1)
+                reg_val_1 = vals01[0] if vals01 else None
+                vals2 = model.read(RESULT_REGISTER_ADDR_1, 1)
                 reg_val_2 = vals2[0] if vals2 else None
+                vals3 = model.read(RESULT_REGISTER_ADDR_2, 1)
+                reg_val_3 = vals3[0] if vals3 else None
             except Exception:
+                reg_val_0 = None
                 reg_val_1 = None
                 reg_val_2 = None
+                reg_val_3 = None
 
-        reg_text_1 = "—" if reg_val_1 is None else f"{reg_val_1}"
+        reg_text_0 = "—" if reg_val_0 is None else f"{reg_val_0}"
+        reg_text_01 = "—" if reg_val_1 is None else f"{reg_val_1}"
         reg_text_2 = "—" if reg_val_2 is None else f"{reg_val_2}"
+        reg_text_3 = "—" if reg_val_3 is None else f"{reg_val_3}"
+        if getattr(self, "lbl_modbus_reg0", None) is not None:
+            self.lbl_modbus_reg0.setText(reg_text_0)
+        if getattr(self, "lbl_modbus_reg01", None) is not None:
+            self.lbl_modbus_reg01.setText(reg_text_01)
         if getattr(self, "lbl_modbus_reg1", None) is not None:
-            self.lbl_modbus_reg1.setText(reg_text_1)
+            self.lbl_modbus_reg1.setText(reg_text_2)
         if getattr(self, "lbl_modbus_reg2", None) is not None:
-            self.lbl_modbus_reg2.setText(reg_text_2)
+            self.lbl_modbus_reg2.setText(reg_text_3)
 
     def _handle_recognition_request(self, cam_index: int):
         reg_addr = RESULT_REGISTER_ADDR_1 if cam_index == 1 else RESULT_REGISTER_ADDR_2
