@@ -1853,7 +1853,7 @@ class MainWindow(QtWidgets.QMainWindow):
         elif getattr(self, "modbus_server", None):
             client_addr = getattr(self.modbus_server, "client_addr", None)
             if client_addr:
-                status_text = f"已连接: {client_addr}"
+                status_text = f"{client_addr}:{self.modbus_port}"
             else:
                 status_text = "未连接"
 
