@@ -1890,7 +1890,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.modbus_model.set_register(trigger_addr, 0)
             self.modbus_model.set_register(pulse_addr, 1)
             QtCore.QTimer.singleShot(
-                50, lambda addr=pulse_addr: self.modbus_model.set_register(addr, 0)
+                1000, lambda addr=pulse_addr: self.modbus_model.set_register(addr, 0)
             )
         self._last_trigger_values[trigger_addr] = 0
 
