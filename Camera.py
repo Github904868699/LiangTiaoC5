@@ -1952,6 +1952,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(int, int, int)
     def _on_yolo_result(self, cam_index: int, reg_addr: int, result_value: int):
+        if not self._trigger_active.get(cam_index, False):
+            self._recognition_in_progress[cam_index] = False
+            return
         self._publish_modbus_result(reg_addr, result_value)
         if self.modbus_model:
             pulse_addr = PULSE_REGISTER_ADDR_1 if cam_index == 1 else PULSE_REGISTER_ADDR_2
