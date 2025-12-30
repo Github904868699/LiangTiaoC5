@@ -1929,6 +1929,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.modbus_model:
                 pulse_addr = PULSE_REGISTER_ADDR_1 if addr == TRIGGER_REGISTER_ADDR_1 else PULSE_REGISTER_ADDR_2
                 self.modbus_model.set_register(pulse_addr, 0)
+                result_addr = RESULT_REGISTER_ADDR_1 if addr == TRIGGER_REGISTER_ADDR_1 else RESULT_REGISTER_ADDR_2
+                self.modbus_model.set_register(result_addr, 0)
 
     @QtCore.pyqtSlot(int)
     def _on_modbus_trigger(self, cam_index: int):
